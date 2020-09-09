@@ -1,5 +1,6 @@
 ﻿using UnityEditor;
 using UnityEngine;
+using Sebastian.Geometry;
 
 [CustomEditor(typeof(ShapeCreator))]
 public class ShapesEditor : Editor
@@ -20,9 +21,12 @@ public class ShapesEditor : Editor
     }
     
     private const float DottedLineThickness = 4.0f;
+    private const float PropertySpacing = 20f;
+
+    private const string _helpMessage = "Left click to add points.\nShift + Left Click on point to delete.\n Shift + Left Click on empty space to create new shape";
     private ShapeCreator _shapeCreator;
     private SelectionInfo _selectionInfo;
-    private bool _needsRepaint = false;
+    private bool _hasShapeChangedSinceLastRepaint;
 
     private Shape SelectedShape
     {
@@ -41,14 +45,68 @@ public class ShapesEditor : Editor
 
     private void OnEnable()
     {
+        _hasShapeChangedSinceLastRepaint = true;
         _shapeCreator = target as ShapeCreator;
         _selectionInfo = new SelectionInfo();
         Undo.undoRedoPerformed += OnUndoOrRedo;
+        Tools.hidden = true;
     }
 
     private void OnDisable()
     {
         Undo.undoRedoPerformed -= OnUndoOrRedo;
+        Tools.hidden = false;
+    }
+
+    public override void OnInspectorGUI()
+    {
+        base.OnInspectorGUI();
+        int shapeDeleteIndex = -1;
+
+        if (_shapeCreator != null && _shapeCreator.shapes != null)
+        {
+            GUILayout.Space(PropertySpacing);
+            EditorGUILayout.HelpBox(_helpMessage, MessageType.Info);
+            _shapeCreator.showShapesList = EditorGUILayout.Foldout(_shapeCreator.showShapesList, "Show List of Shapes");
+
+            if (_shapeCreator.showShapesList)
+            {
+                for (int i = 0, len = _shapeCreator.shapes.Count; i < len; i++)
+                {
+                    using (new GUILayout.HorizontalScope())
+                    {
+                        GUILayout.Label($"Shape {i+1}");
+
+                        GUI.enabled = i != _selectionInfo.selectedShapeIndex;
+                    
+                        if (GUILayout.Button("Select"))
+                        {
+                            _selectionInfo.selectedShapeIndex = i;
+                        }
+
+                        GUI.enabled = true;
+
+                        if (GUILayout.Button("Delete"))
+                        {
+                            shapeDeleteIndex = i;
+                        }  
+                    }
+                }
+            }
+            
+            if (shapeDeleteIndex != -1)
+            {
+                Undo.RecordObject(_shapeCreator, "Delete Shape");
+                _shapeCreator.shapes.RemoveAt(shapeDeleteIndex);
+                _selectionInfo.selectedShapeIndex = Mathf.Clamp(_selectionInfo.selectedShapeIndex, 0, _shapeCreator.shapes.Count - 1);
+            }
+
+            if (GUI.changed)
+            {
+                _hasShapeChangedSinceLastRepaint = true;
+                SceneView.RepaintAll();
+            }
+        }
     }
 
     private void OnSceneGUI()
@@ -70,9 +128,8 @@ public class ShapesEditor : Editor
         {
             HandleInput(guiEvent);
             
-            if (_needsRepaint)
+            if (_hasShapeChangedSinceLastRepaint)
             {
-                _needsRepaint = false;
                 HandleUtility.Repaint();
             }
             
@@ -92,14 +149,23 @@ public class ShapesEditor : Editor
     private void CreateNewPoint(Vector3 mousePosition)
     {
         bool isMouseOverSelectedShape = _selectionInfo.mouseOverShapeIndex == _selectionInfo.selectedShapeIndex;
-        int newPointIndex = _selectionInfo.isMouseOverLine && isMouseOverSelectedShape ? _selectionInfo.lineIndex + 1 : SelectedShape.Points.Count;
+        int newPointIndex = _selectionInfo.isMouseOverLine && isMouseOverSelectedShape ? _selectionInfo.lineIndex + 1 : SelectedShape.points.Count;
         Undo.RecordObject(_shapeCreator, "Add Point");
-        SelectedShape.Points.Insert(newPointIndex, mousePosition);
+        SelectedShape.points.Insert(newPointIndex, mousePosition);
         _selectionInfo.pointIndex = newPointIndex;
         _selectionInfo.mouseOverShapeIndex = _selectionInfo.selectedShapeIndex;
-        _needsRepaint = true;
+        _hasShapeChangedSinceLastRepaint = true;
         
         SelectPointUnderMouse();
+    }
+
+    private void DeletePointUnderMouse()
+    {
+        Undo.RecordObject(_shapeCreator, "Delete Point");
+        SelectedShape.points.RemoveAt(_selectionInfo.pointIndex);
+        _selectionInfo.isPointSelected = false;
+        _selectionInfo.isMouseOverPoint = false;
+        _hasShapeChangedSinceLastRepaint = true;
     }
 
     private void SelectPointUnderMouse()
@@ -109,12 +175,9 @@ public class ShapesEditor : Editor
         _selectionInfo.isMouseOverLine = false;
         _selectionInfo.lineIndex = -1;
 
-        if (_selectionInfo.pointIndex < SelectedShape.Points.Count)
-        {
-            _selectionInfo.positionAtStartOfDrag = SelectedShape.Points[_selectionInfo.pointIndex];
-        }
 
-        _needsRepaint = true;
+        _selectionInfo.positionAtStartOfDrag = SelectedShape.points[_selectionInfo.pointIndex];
+        _hasShapeChangedSinceLastRepaint = true;
     }
 
     private void SelectShapeUnderMouse()
@@ -122,7 +185,7 @@ public class ShapesEditor : Editor
         if (_selectionInfo.mouseOverShapeIndex != -1)
         {
             _selectionInfo.selectedShapeIndex = _selectionInfo.mouseOverShapeIndex;
-            _needsRepaint = true;
+            _hasShapeChangedSinceLastRepaint = true;
         }
     }
 
@@ -168,8 +231,16 @@ public class ShapesEditor : Editor
 
     private void HandleShiftLeftMouseDown(Vector3 mousePosition)
     {
-        CreateNewShape();
-        CreateNewPoint(mousePosition);
+        if (_selectionInfo.isMouseOverPoint)
+        {
+            SelectShapeUnderMouse();
+            DeletePointUnderMouse();
+        }
+        else
+        {
+            CreateNewShape();
+            CreateNewPoint(mousePosition);
+        }
     }
 
     // if mouse is over currently existing point, select that point. if not then add new point
@@ -196,12 +267,12 @@ public class ShapesEditor : Editor
     {
         if (_selectionInfo.isPointSelected) 
         {
-            SelectedShape.Points[_selectionInfo.pointIndex] = _selectionInfo.positionAtStartOfDrag;
+            SelectedShape.points[_selectionInfo.pointIndex] = _selectionInfo.positionAtStartOfDrag;
             Undo.RecordObject(_shapeCreator, "Move Point");
-            SelectedShape.Points[_selectionInfo.pointIndex] = mousePosition; // so that Undo will revert to position of MouseDown
+            SelectedShape.points[_selectionInfo.pointIndex] = mousePosition; // so that Undo will revert to position of MouseDown
             _selectionInfo.isPointSelected = false;
             _selectionInfo.pointIndex = -1;
-            _needsRepaint = true;
+            _hasShapeChangedSinceLastRepaint = true;
         }
     }
 
@@ -209,8 +280,8 @@ public class ShapesEditor : Editor
     {
         if (_selectionInfo.isPointSelected)
         {
-            SelectedShape.Points[_selectionInfo.pointIndex] = mousePosition;
-            _needsRepaint = true;
+            SelectedShape.points[_selectionInfo.pointIndex] = mousePosition;
+            _hasShapeChangedSinceLastRepaint = true;
         }
     }
 
@@ -232,9 +303,9 @@ public class ShapesEditor : Editor
 
             if (shape != null)
             {
-                for (int i = 0, len = shape.Points.Count; i < len; i++)
+                for (int i = 0, len = shape.points.Count; i < len; i++)
                 {
-                    if (Vector3.Distance(mousePosition, shape.Points[i]) < _shapeCreator.HandleRadius)
+                    if (Vector3.Distance(mousePosition, shape.points[i]) < _shapeCreator.HandleRadius)
                     {
                         mouseOverPointIndex = i;
                         mouseOverShapeIndex = shapeIndex;
@@ -251,7 +322,7 @@ public class ShapesEditor : Editor
             _selectionInfo.pointIndex = mouseOverPointIndex;
             _selectionInfo.isMouseOverPoint = mouseOverPointIndex != -1;
 
-            _needsRepaint = true;
+            _hasShapeChangedSinceLastRepaint = true;
         }
 
         if (_selectionInfo.isMouseOverPoint)
@@ -270,10 +341,10 @@ public class ShapesEditor : Editor
 
                 if (shape != null)
                 {
-                    for (int i = 0, len = shape.Points.Count; i < len; i++)
+                    for (int i = 0, len = shape.points.Count; i < len; i++)
                     {
-                        Vector3 currentPointInShape = shape.Points[i];
-                        Vector3 nextPointInShape = shape.Points[(i + 1) % len];
+                        Vector3 currentPointInShape = shape.points[i];
+                        Vector3 nextPointInShape = shape.points[(i + 1) % len];
                         float dstFromMouseToLine = HandleUtility.DistancePointToLineSegment(mousePosition.ToXZ(), currentPointInShape.ToXZ(), nextPointInShape.ToXZ());
 
                         if (dstFromMouseToLine < closestLineDistance)
@@ -292,17 +363,19 @@ public class ShapesEditor : Editor
                 _selectionInfo.mouseOverShapeIndex = mouseOverShapeIndex;
                 _selectionInfo.lineIndex = mouseOverLineIndex;
                 _selectionInfo.isMouseOverLine = mouseOverLineIndex != -1;
-                _needsRepaint = true;
+                _hasShapeChangedSinceLastRepaint = true;
             }
         }
     }
 
     private void OnUndoOrRedo()
     {
-        if (_shapeCreator != null && _shapeCreator.shapes != null && _selectionInfo.selectedShapeIndex >= _shapeCreator.shapes.Count)
+        if (_shapeCreator != null && _shapeCreator.shapes != null && (_selectionInfo.selectedShapeIndex >= _shapeCreator.shapes.Count || _selectionInfo.selectedShapeIndex == -1))
         {
             _selectionInfo.selectedShapeIndex = _shapeCreator.shapes.Count - 1;
         }
+
+        _hasShapeChangedSinceLastRepaint = true;
     }
 
     private void Draw()
@@ -318,10 +391,10 @@ public class ShapesEditor : Editor
 
                 if (shape != null)
                 {
-                    for (int i = 0, len = shape.Points.Count; i < len; i++)
+                    for (int i = 0, len = shape.points.Count; i < len; i++)
                     {
-                        Vector3 currentPoint = shape.Points[i];
-                        Vector3 nextPoint = shape.Points[(i + 1) % len];
+                        Vector3 currentPoint = shape.points[i];
+                        Vector3 nextPoint = shape.points[(i + 1) % len];
 
                         if (i == _selectionInfo.lineIndex && isMouseOverShape)
                         {
@@ -348,7 +421,14 @@ public class ShapesEditor : Editor
                 }
             }
             
-            _needsRepaint = false;
+            // using this to check to see if the shape has changes since the last repaint call
+            if (_hasShapeChangedSinceLastRepaint)
+            {
+                _shapeCreator.UpdateMeshDisplay();
+                SceneView.RepaintAll();
+            }
+
+            _hasShapeChangedSinceLastRepaint = false;
         }
     }
 }
